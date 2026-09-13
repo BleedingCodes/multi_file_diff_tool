@@ -110,14 +110,26 @@ def compute_all_pairs(
     """Diff every unique pair of loaded files (all-vs-all)."""
     results: list[PairResult] = []
 
+    # Build a display name for each file: use the plain filename, but if two
+    # loaded files share the same filename, fall back to the full path so the
+    # diff header is unambiguous.
+    all_names = [f.path.name for f in loaded_files]
+    def _display_name(file: LoadedFile) -> str:
+        if all_names.count(file.path.name) > 1:
+            return str(file.path)
+        return file.path.name
+
     for file_a, file_b in itertools.combinations(loaded_files, 2):
         lines_a = normalize_lines(file_a.lines, options)
         lines_b = normalize_lines(file_b.lines, options)
 
+        name_a = _display_name(file_a)
+        name_b = _display_name(file_b)
+
         diff_lines = list(
             difflib.unified_diff(
                 lines_a, lines_b,
-                fromfile=file_a.path.name, tofile=file_b.path.name,
+                fromfile=name_a, tofile=name_b,
                 lineterm="",
             )
         )
@@ -130,7 +142,7 @@ def compute_all_pairs(
         )
 
         results.append(PairResult(
-            name_a=file_a.path.name, name_b=file_b.path.name,
+            name_a=name_a, name_b=name_b,
             lines_a=lines_a, lines_b=lines_b,
             diff_lines=diff_lines,
             added_count=added_count, removed_count=removed_count,
@@ -279,10 +291,16 @@ def build_html_report(
     differ = difflib.HtmlDiff(wrapcolumn=100)
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    # difflib.HtmlDiff._styles and ._legend are private but stable across
+    # Python 3.9–3.12.  Extract them defensively so a future stdlib change
+    # degrades gracefully instead of crashing.
+    _inline_styles = getattr(differ, "_styles", "")
+    _legend_html = getattr(differ, "_legend", "")
+
     page = [
         "<!DOCTYPE html>",
         "<html><head><meta charset='utf-8'><title>Multi-File Diff Report</title>",
-        f"<style>{differ._styles}\n"
+        f"<style>{_inline_styles}\n"
         "body{font-family:Arial,Helvetica,sans-serif;margin:2em;background:#fafafa;color:#222;}"
         "h1{font-size:1.4em;}"
         "h2{font-size:1.05em;margin-top:2em;border-bottom:1px solid #ccc;padding-bottom:4px;}"
@@ -293,7 +311,7 @@ def build_html_report(
         f"ignore whitespace: {options.ignore_whitespace} &middot; "
         f"ignore case: {options.ignore_case}</p>",
         f"<p><strong>{format_summary_line(loaded_files, pair_results)}</strong></p>",
-        differ._legend,
+        _legend_html,
     ]
 
     for pair in pair_results:
@@ -385,7 +403,11 @@ def run_cli(argv: list[str]) -> int:
 
     if args.html:
         html = build_html_report(loaded_files, pair_results, options)
-        Path(args.html).write_text(html, encoding="utf-8")
+        try:
+            Path(args.html).write_text(html, encoding="utf-8")
+        except OSError as error:
+            print(f"Could not write HTML report to {args.html}: {error}", file=sys.stderr)
+            return 1
         print(f"HTML report written to {args.html}")
 
     return 0
@@ -411,7 +433,11 @@ def _run_merge_cli(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     merged_text = "".join(merged_lines)
 
     if args.output:
-        Path(args.output).write_text(merged_text, encoding="utf-8")
+        try:
+            Path(args.output).write_text(merged_text, encoding="utf-8")
+        except OSError as error:
+            print(f"Could not write merged output to {args.output}: {error}", file=sys.stderr)
+            return 1
         print(f"Merged output written to {args.output}", file=sys.stderr)
     else:
         print(merged_text, end="")
@@ -498,8 +524,15 @@ class MultiFileDiffApp:
         if not file_paths:
             return  # user cancelled the dialog
 
+        already_loaded = {f.path.resolve() for f in self.loaded_files}
         for raw_path in file_paths:
             path = Path(raw_path)
+            resolved = path.resolve()
+            if resolved in already_loaded:
+                messagebox.showinfo(
+                    "Already loaded", f"{path.name} is already in the list."
+                )
+                continue
             try:
                 loaded_file = load_file(path)
             except OSError as error:
@@ -508,6 +541,7 @@ class MultiFileDiffApp:
                 )
                 continue
 
+            already_loaded.add(resolved)
             self.loaded_files.append(loaded_file)
             self.file_listbox.insert("end", path.name)
 
@@ -694,7 +728,7 @@ class MergeResultsWindow:
             if line.startswith("<<<<<<<"):
                 side = "ours"
                 text_widget.insert("end", line, "header")
-            elif line == "=======\n":
+            elif line.rstrip("\n") == "=======":
                 side = "theirs"
                 text_widget.insert("end", line, "header")
             elif line.startswith(">>>>>>>"):

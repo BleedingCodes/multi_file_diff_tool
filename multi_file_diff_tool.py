@@ -193,7 +193,14 @@ def _find_clusters(ops_ours, ops_theirs):
 
     clusters = []
     for i1, i2, side in changes:
-        if clusters and i1 <= clusters[-1][1]:
+        # Use strict less-than (<) so adjacent but non-overlapping ranges stay
+        # separate. [1, 2) and [2, 3) share an endpoint but do not overlap —
+        # they touch the same base-index boundary rather than the same base
+        # line. Treating them as one cluster would falsely conflict two edits
+        # that touch different lines with no shared base content between them.
+        # Truly overlapping ranges (i1 < clusters[-1][1]) are still merged
+        # because they share at least one base line.
+        if clusters and i1 < clusters[-1][1]:
             lo, hi, sides = clusters[-1]
             clusters[-1] = (lo, max(hi, i2), sides | {side})
         else:
@@ -239,13 +246,12 @@ def three_way_merge(
       - if both sides made the *same* change, take it (no conflict)
       - if both sides changed it *differently*, that's a real conflict
 
-    This is opcode-cluster based rather than anchor-based, which is the
-    same algorithm used by this project's sibling tool,
-    file_diff_viewer_threeway_merge.py — both tools now agree on every
-    edge case, including two edits on directly adjacent lines with no
-    unchanged line between them (those still conflict: there's no safe
-    sync point proving the edits are independent, which matches how GNU
-    diff3 and `git merge-file` behave too).
+    This is opcode-cluster based rather than anchor-based. Adjacent but
+    non-overlapping ranges (e.g. ours edits line 2, theirs edits line 3,
+    with no shared base content between them) are kept as separate clusters
+    and merge cleanly. Truly overlapping ranges — where both sides changed
+    at least one common base line — produce a conflict, which matches how
+    GNU diff3 and `git merge-file` behave.
     """
     ops_ours = difflib.SequenceMatcher(None, base_lines, ours_lines, autojunk=False).get_opcodes()
     ops_theirs = difflib.SequenceMatcher(None, base_lines, theirs_lines, autojunk=False).get_opcodes()
